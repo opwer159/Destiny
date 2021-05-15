@@ -1,0 +1,318 @@
+{\rtf1\ansi\ansicpg950\deff0\nouicompat\deflang1033\deflangfe1028{\fonttbl{\f0\fnil\fcharset136 SimSun;}}
+{\colortbl ;\red0\green0\blue255;}
+{\*\generator Riched20 10.0.19041}\viewkind4\uc1 
+\pard\sa200\sl276\slmult1\f0\fs22\lang2052 #!/bin/bash\par
+#credits to @BasRaayman and @inchenzo\par
+\par
+INTERFACE="tun0"\par
+DEFAULT_NET="10.8.0.0/24"\par
+RED='\\033[0;31m'\par
+GREEN='\\033[0;32m'\par
+BLUE='\\033[0;34m'\par
+NC='\\033[0m'\par
+\par
+while getopts "a:" opt; do\par
+  case $opt in\par
+    a) action=$OPTARG ;;\par
+    *) echo 'Not a valid command' >&2\par
+       exit 1\par
+  esac\par
+done\par
+\par
+reset_ip_tables () \{\par
+  sudo service iptables restart\par
+\par
+  #reset iptables to default\par
+  sudo iptables -P INPUT ACCEPT\par
+  sudo iptables -P FORWARD ACCEPT\par
+  sudo iptables -P OUTPUT ACCEPT\par
+\par
+  sudo iptables -F\par
+  sudo iptables -X\par
+\par
+  #allow openvpn\par
+  if ip a | grep -q "tun0"; then\par
+    if ! sudo iptables-save | grep -q "POSTROUTING -s 10.8.0.0/24"; then\par
+      sudo iptables -t nat -A POSTROUTING -s 10.8.0.0/24 -o eth0 -j MASQUERADE\par
+    fi\par
+    sudo iptables -A INPUT -p udp -m udp --dport 1194 -j ACCEPT\par
+    sudo iptables -A FORWARD -m state --state RELATED,ESTABLISHED -j ACCEPT\par
+    sudo iptables -A FORWARD -s 10.8.0.0/24 -j ACCEPT\par
+  fi\par
+\}\par
+\par
+get_platform_match_str () \{\par
+  local val="psn-4"\par
+  if [ "$1" == "psn" ]; then\par
+    val="psn-4"\par
+  elif [ "$1" == "xbox" ]; then\par
+    val="xboxpwid:"\par
+  elif [ "$1" == "steam" ]; then\par
+    val="steamid:"\par
+  fi\par
+  echo $val\par
+\}\par
+\par
+install_dependencies () \{\par
+  sudo sysctl -w net.ipv4.ip_forward=1 > /dev/null\par
+  sudo ufw disable > /dev/null\par
+\par
+  if ip a | grep -q "tun0"; then\par
+    yn="n"\par
+  else \par
+    echo -e -n "$\{GREEN\}Would you like to install OpenVPN?$\{NC\} y/n: "\par
+    read yn\par
+    yn=$\{yn:-"y"\}\par
+  fi\par
+\par
+  echo -e "$\{RED\}Installing dependencies. Please wait while it finishes...$\{NC\}"\par
+  sudo apt-get update > /dev/null\par
+  \par
+  if [ "$yn" == "y" ]; then\par
+    sudo DEBIAN_FRONTEND=noninteractive apt-get -y -q install iptables iptables-persistent ngrep nginx > /dev/null\par
+    echo -e "$\{RED\}Installing OpenVPN. Please wait while it finishes...$\{NC\}"\par
+    sudo wget -q {{\field{\*\fldinst{HYPERLINK https://git.io/vpn }}{\fldrslt{https://git.io/vpn\ul0\cf0}}}}\f0\fs22  -O openvpn-ubuntu-install.sh\par
+    sudo chmod +x ./openvpn-ubuntu-install.sh\par
+    (APPROVE_INSTALL=y APPROVE_IP=y IPV6_SUPPORT=n PORT_CHOICE=1 PROTOCOL_CHOICE=1 DNS=1 COMPRESSION_ENABLED=n CUSTOMIZE_ENC=n CLIENT=client PASS=1 ./openvpn-ubuntu-install.sh) &\par
+    wait;\par
+    sudo cp /root/client.ovpn /var/www/html/client.ovpn\par
+    ip=$(dig +short myip.opendns.com @resolver1.opendns.com)\par
+    echo -e "$\{GREEN\}You can download the openvpn config from $\{BLUE\}http://$ip/client.ovpn"\par
+    echo -e "$\{GREEN\}If you are unable to access this file, you may need to allow/open the http port 80 with your vps provider."\par
+    echo -e "Otherwise you can always run the command cat /root/client.ovpn and copy/paste ALL of its contents in a file on your PC."\par
+    echo -e "It will be deleted automatically in 15 minutes for security reasons."\par
+    echo -e "Be sure to import this config to your router and connect your consoles before proceeding any further.$\{NC\}"\par
+    nohup bash -c 'sleep 900 && sudo service nginx stop && sudo apt remove nginx -y && sudo rm /var/www/html/client.ovpn' &>/dev/null &\par
+  else\par
+    sudo DEBIAN_FRONTEND=noninteractive apt-get -y -q install iptables iptables-persistent ngrep > /dev/null\par
+  fi\par
+\}\par
+\par
+setup () \{\par
+  echo "Setting up firewall rules."\par
+  reset_ip_tables\par
+\par
+  read -p "Enter your platform xbox, psn, steam: " platform\par
+  platform=$(echo "$platform" | xargs)\par
+  platform=$\{platform:-"psn"\}\par
+\par
+  reject_str=$(get_platform_match_str $platform)\par
+  echo $platform > /tmp/data.txt\par
+\par
+  read -p "Enter your network/netmask: " net\par
+  net=$(echo "$net" | xargs)\par
+  net=$\{net:-$DEFAULT_NET\}\par
+  echo $net >> /tmp/data.txt\par
+\par
+  ids=()\par
+  read -p "Would you like to sniff the ID automatically?(psn/xbox/steam only) y/n: " yn\par
+  yn=$\{yn:-"y"\}\par
+  if ! [[ $platform =~ ^(psn|xbox|steam)$ ]]; then\par
+    yn="n"\par
+  fi\par
+  echo "n" >> /tmp/data.txt\par
+\par
+  #auto sniffer\par
+  if [ "$yn" == "y" ]; then\par
+\par
+    echo -e "$\{RED\}Press any key to stop sniffing. DO NOT CTRL C$\{NC\}"\par
+    sleep 1\par
+    if [ $platform == "psn" ]; then\par
+      ngrep -l -q -W byline -d $INTERFACE "psn-4" udp | grep --line-buffered -o -P 'psn-4[0]\{8\}\\K[A-F0-9]\{7\}' | tee -a /tmp/data.txt &\par
+    elif [ $platform == "xbox" ]; then\par
+      ngrep -l -q -W byline -d $INTERFACE "xboxpwid:" udp | grep --line-buffered -o -P 'xboxpwid:[A-F0-9]\{24\}\\K[A-F0-9]\{8\}' | tee -a /tmp/data.txt &\par
+    elif [ $platform == "steam" ]; then\par
+      ngrep -l -q -W byline -d $INTERFACE "steamid:" udp | grep --line-buffered -o -P 'steamid:[0-9]\{7\}\\K[0-9]\{10\}' | tee -a /tmp/data.txt &\par
+    fi\par
+\par
+    while [ true ] ; do\par
+      read -t 1 -n 1\par
+      if [ $? = 0 ] ; then\par
+        break\par
+      fi\par
+    done\par
+    pkill -15 ngrep\par
+\par
+    #remove duplicates\par
+    awk '!a[$0]++' /tmp/data.txt > /tmp/temp.txt && mv /tmp/temp.txt /tmp/data.txt\par
+    #get number of accounts\par
+    snum=$(tail -n +4 /tmp/data.txt | wc -l)\par
+    awk "NR==4\{print $snum\}1" /tmp/data.txt > /tmp/temp.txt && mv /tmp/temp.txt /tmp/data.txt\par
+    #get ids and add to ads array with identifier\par
+    tmp_ids=$(tail -n +5 /tmp/data.txt)\par
+    c=1\par
+    while IFS= read -r line; do \par
+      idf="system$c"\par
+      ids+=( "$idf;$line" )\par
+      ((c++))\par
+    done <<< "$tmp_ids"\par
+  else #add ids manually\par
+    read -p "How many accounts are you using for this? " snum\par
+    if [ $snum -lt 1 ]; then\par
+      exit 1;\par
+    fi;\par
+    echo $snum >> /tmp/data.txt\par
+    for ((i = 0; i < snum; i++))\par
+    do \par
+      num=$(( $i + 1 ))\par
+      idf="system$num"\par
+      read -p "Enter the sniffed ID for Account $num: " sid\par
+      sid=$(echo "$sid" | xargs)\par
+      echo $sid >> /tmp/data.txt\par
+      ids+=( "$idf;$sid" )\par
+    done\par
+  fi;\par
+\par
+  mv /tmp/data.txt ./data.txt\par
+\par
+  echo "-m string --string $reject_str --algo bm -j REJECT" > reject.rule\par
+  sudo iptables -I FORWARD -m string --string $reject_str --algo bm -j REJECT\par
+  \par
+  n=$\{#ids[*]\}\par
+  INDEX=1\par
+  for (( i = n-1; i >= 0; i-- ))\par
+  do\par
+    elem=$\{ids[i]\}\par
+    offset=$((n - 2))\par
+    if [ $INDEX -gt $offset ]; then\par
+      inet=$net\par
+    else\par
+      inet="0.0.0.0/0"\par
+    fi\par
+    IFS=';' read -r -a id <<< "$elem"\par
+    sudo iptables -N "$\{id[0]\}"\par
+    sudo iptables -I FORWARD -s $inet -p udp -m string --string "$\{id[1]\}" --algo bm -j "$\{id[0]\}"\par
+    ((INDEX++))\par
+  done\par
+  \par
+  INDEX1=1\par
+  for i in "$\{ids[@]\}"\par
+  do\par
+    IFS=';' read -r -a id <<< "$i"\par
+    INDEX2=1\par
+    for j in "$\{ids[@]\}"\par
+    do\par
+      if [ "$i" != "$j" ]; then\par
+        if [[ $INDEX1 -eq 1 && $INDEX2 -eq 2 ]]; then\par
+          inet=$net\par
+        elif [[ $INDEX1 -eq 2 && $INDEX2 -eq 1 ]]; then\par
+          inet=$net\par
+        elif [[ $INDEX1 -gt 2 && $INDEX2 -lt 3 ]]; then\par
+          inet=$net\par
+        else\par
+          inet="0.0.0.0/0"\par
+        fi\par
+        IFS=';' read -r -a idx <<< "$j"\par
+        sudo iptables -A "$\{id[0]\}" -s $inet -p udp -m string --string "$\{idx[1]\}" --algo bm -j ACCEPT\par
+      fi\par
+      ((INDEX2++))\par
+    done\par
+    ((INDEX1++))\par
+  done\par
+\par
+  iptables-save > /etc/iptables/rules.v4\par
+\par
+  echo "Setup is complete and matchmaking firewall is now active."\par
+\}\par
+\par
+if [ "$action" == "setup" ]; then\par
+  if ! command -v ngrep &> /dev/null\par
+  then\par
+      install_dependencies\par
+  fi\par
+  setup\par
+elif [ "$action" == "stop" ]; then\par
+  echo "Matchmaking is no longer being restricted."\par
+  reject=$(<reject.rule)\par
+  sudo iptables -D FORWARD $reject\par
+elif [ "$action" == "start" ]; then\par
+  if ! sudo iptables-save | grep -q "REJECT"; then\par
+    echo "Matchmaking is now being restricted."\par
+    pos=$(iptables -L FORWARD | grep "system" | wc -l)\par
+    ((pos++))\par
+    reject=$(<reject.rule)\par
+    sudo iptables -I FORWARD $pos $reject\par
+  fi\par
+elif [ "$action" == "add" ]; then\par
+  read -p "Enter the sniffed ID: " id\par
+  id=$(echo "$id" | xargs)\par
+  if [ ! -z "$id" ]; then\par
+    echo $id >> data.txt\par
+    n=$(sed -n '4p' < data.txt)\par
+    ((n++))\par
+    sed -i "4c$n" data.txt\par
+    read -p "Would you like to enter another ID? y/n " yn\par
+    yn=$\{yn:-"y"\}\par
+    if [ $yn == "y" ]; then\par
+      bash d2firewall.sh -a add\par
+    else\par
+      bash d2firewall.sh -a setup < data.txt\par
+    fi\par
+  fi\par
+elif [ "$action" == "remove" ]; then\par
+  list=$(tail -n +5 data.txt | cat -n)\par
+  echo "$list"\par
+  total=$(echo "$list" | wc -l)\par
+  read -p "How many IDs do you want to remove from the end of this list? " num\par
+  if [[ $num -gt 0 && $num -le $total ]]; then\par
+    head -n -"$num" data.txt > /tmp/data.txt && mv /tmp/data.txt ./data.txt\par
+    n=$(sed -n '4p' < data.txt)\par
+    n=$((n-num))\par
+    sed -i "4c$n" data.txt\par
+    bash d2firewall.sh -a setup < data.txt\par
+  fi;\par
+elif [ "$action" == "sniff" ]; then\par
+  platform=$(sed -n '1p' < data.txt)\par
+  if ! [[ $platform =~ ^(psn|xbox|steam)$ ]]; then\par
+      echo "Only psn,xbox, and steam are supported atm."\par
+    exit 1\par
+  fi\par
+  bash d2firewall.sh -a stop\par
+\par
+  #auto sniff\par
+  echo -e "$\{RED\}Press any key to stop sniffing. DO NOT CTRL C$\{NC\}"\par
+\par
+  sleep 1\par
+  if [ $platform == "psn" ]; then\par
+    ngrep -l -q -W byline -d $INTERFACE "psn-4" udp | grep --line-buffered -o -P 'psn-4[0]\{8\}\\K[A-F0-9]\{7\}' | tee -a data.txt &\par
+  elif [ $platform == "xbox" ]; then\par
+    ngrep -l -q -W byline -d $INTERFACE "xboxpwid:" udp | grep --line-buffered -o -P 'xboxpwid:[A-F0-9]\{24\}\\K[A-F0-9]\{8\}' | tee -a data.txt &\par
+  elif [ $platform == "steam" ]; then\par
+    ngrep -l -q -W byline -d $INTERFACE "steamid:" udp | grep --line-buffered -o -P 'steamid:[0-9]\{7\}\\K[0-9]\{10\}' | tee -a data.txt &\par
+  fi\par
+  while [ true ] ; do\par
+    read -t 1 -n 1\par
+    if [ $? = 0 ] ; then\par
+      break\par
+    fi\par
+  done\par
+  pkill -15 ngrep\par
+\par
+  #remove duplicates\par
+  awk '!a[$0]++' data.txt > /tmp/data.txt && mv /tmp/data.txt ./data.txt\par
+\par
+  #update total number of ids\par
+  n=$(tail -n +5 data.txt | wc -l)\par
+  sed -i "4c$n" data.txt\par
+\par
+  bash d2firewall.sh -a setup < data.txt\par
+elif [ "$action" == "list" ]; then\par
+  tail -n +5 data.txt | cat -n\par
+elif [ "$action" == "update" ]; then\par
+  wget -q {{\field{\*\fldinst{HYPERLINK https://raw.githubusercontent.com/cloudex99/Destiny-2-Matchmaking-Firewall/main/d2firewall.sh }}{\fldrslt{https://raw.githubusercontent.com/cloudex99/Destiny-2-Matchmaking-Firewall/main/d2firewall.sh\ul0\cf0}}}}\f0\fs22  -O ./d2firewall.sh\par
+  chmod +x ./d2firewall.sh\par
+  echo -e "$\{GREEN\}Script update complete."\par
+  echo -e "Please rerun the initial setup to avoid any issues.$\{NC\}"\par
+elif [ "$action" == "load" ]; then\par
+  echo "Loading firewall rules."\par
+  if [ -f ./data.txt ]; then\par
+      bash d2firewall.sh -a setup < ./data.txt\par
+  else\par
+    iptables-restore < /etc/iptables/rules.v4\par
+  fi\par
+elif [ "$action" == "reset" ]; then\par
+  echo "Erasing all firewall rules."\par
+  reset_ip_tables\par
+fi\par
+}
+ 
